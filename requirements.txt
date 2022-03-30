@@ -1,0 +1,8 @@
+numpy
+matplotlib
+astropy
+scipy
+dlnpyutils
+corner
+emcee
+dill
