@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import stats
+import copy
 import emcee
 import corner
 
@@ -312,7 +313,10 @@ class VariableSampler:
             totwtydict[b] = np.sum(data['wt'][ind] * data['mag'][ind])
         self._totwtdict = totwtdict
         self._totwtydict = totwtydict
-            
+
+    def copy(self):
+        """ Make a copy."""
+        return copy.deepcopy(self)
         
     def run(self,pmin=0.1,pmax=None,offsetrange=None,minsample=128,npoints=200000,
             unirefine=True,keepnegamp=False,verbose=True):
@@ -754,6 +758,9 @@ class Sampler:
         self._kwargs = kwargs
         # kwargs is a dictionary of additional keyword arguments to be passed to log_probability()
 
+    def copy(self):
+        """ Make a copy."""
+        return copy.deepcopy(self)
         
     def run(self,pmin=0.1,pmax=None,minsample=128,npoints=200000):
         """ Run the sampling."""
