@@ -9,7 +9,7 @@ mobiusmc
 
 Introduction
 ============
-|mobiusmc| is a package to sample period signals.
+|mobiusmc| is a package to sample periodic signals such as variable star light curves.
 
 .. toctree::
    :maxdepth: 1
