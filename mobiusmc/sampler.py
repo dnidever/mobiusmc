@@ -890,7 +890,7 @@ class LinearModelSampler:
         wtresid = resid**2 * data['wt']
         lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['yerr']**2))
 
-    return amplitude,constant,tmpl,lnlkhood
+        return amplitude,constant,tmpl,lnlkhood
 
     
     def copy(self):
