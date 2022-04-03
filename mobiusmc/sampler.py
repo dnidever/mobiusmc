@@ -314,6 +314,68 @@ class VariableSampler:
         self._totwtdict = totwtdict
         self._totwtydict = totwtydict
 
+    def solve(period,offset):
+        """ Solve variable star for a single period/phase value."""
+
+        data = self.data
+        template = self.template
+        bandindex = self._bandindex
+        totwtdict = self._totwtdict
+        totwtydict = self._totwtydict
+        
+        ndata = len(data)
+        
+        # Calculate phase for each data point
+        phase = (data['jd']/period + offset) % 1
+            
+        # Calculate template values for this set of period and phase
+        tmpl = np.interp(phase,template['phase'],template['mag'])
+            
+        # -- Find best fitting values for linear parameters ---
+        # Calculate amplitude
+        # term1 = Sum of XY
+        # term2 = Sum of X * Y / W 
+        # term3 = Sum of X^2
+        # term4 = Sum of X * X / W
+        # amplitude = (term1 - term2)/(term3 - term4)
+        term1 = 0.0
+        term2 = 0.0
+        term3 = 0.0
+        term4 = 0.0
+        totwtxdict = {}
+        for b in bandindex.keys():
+            ind = bandindex[b]
+            totwtx1 = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b])
+            totwtxdict[b] = totwtx1
+            totwtx2 = np.sum(data['wt'][ind] * (tmpl[ind]*ampratios[b])**2)
+            totwtxy = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b] * data['mag'][ind])      
+            term1 += totwtxy
+            term2 += totwtx1 * totwtydict[b] / totwtdict[b]
+            term3 += totwtx2
+            term4 += totwtx1**2 / totwtdict[b]
+        amplitude = (term1-term2)/(term3-term4)
+            
+        # Calculate best mean magnitudes
+        # mean mag = (Y - amplitude * X)/W
+        meanmag = {}
+        for b in bandindex.keys():
+            meanmag1 = (totwtydict[b] - amplitude * totwtxdict[b])/totwtdict[b]
+            meanmag[b] = meanmag1
+            
+        # Calculate likelihood/chisq
+        model = np.zeros(ndata,float)
+        resid = np.zeros(ndata,float)
+        wtresid = np.zeros(ndata,float)        
+        for b in bandindex.keys():
+            ind = bandindex[b]          
+            model1 = tmpl[ind]*ampratios[b]*amplitude+meanmag[b]
+            model[ind] = model1
+            resid[ind] = data['mag'][ind]-model1
+            wtresid[ind] = resid[ind]**2 * data['wt'][ind]
+        lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['err']**2))
+
+        return amplitude,meanmag,model,lnlkhood
+              
     def copy(self):
         """ Make a copy."""
         return copy.deepcopy(self)
@@ -605,9 +667,7 @@ class VariableSampler:
             bestperiod = pars_ml[0]
             bestoffset = pars_ml[1]
             bestlnprob = emsampler.lnprobability[bestind[0],bestind[1]]
-            bestamplitude,bestmeanmag,model,lnlkhood = solvevariable(data,template,ampratios,bandindex,
-                                                                     bestperiod,bestoffset,totwtdict,totwtydict)
-
+            bestamplitude,bestmeanmag,tmpl,lnlkhood = self.solve(bestperiod,bestoffset)
             
             print('Best period = %.4f' % bestperiod)
             print('Best offset = %.4f' % bestoffset)
@@ -773,6 +833,52 @@ class LinearModelSampler:
         self._totwt = totwt
         self._totwty = totwty
 
+    def solve(self,period,offset):
+        """ Solve for a single period and offset."""
+
+        data = self.data
+        ndata = len(data)
+        
+        # Calculate phase for each data point
+        phase = (data['x']/period + offset) % 1
+            
+        # Calculate template values for this set of period and phase
+        if hasattr(model, '__call__'):            
+            tmpl = model(phase)
+        else:
+            tmpl = np.interp(phase,model['x'],model['y'])
+            
+        # -- Find best fitting values for linear parameters ---
+        # Calculate amplitude
+        # term1 = Sum of XY
+        # term2 = Sum of X * Y / W 
+        # term3 = Sum of X^2
+        # term4 = Sum of X * X / W
+        # amplitude = (term1 - term2)/(term3 - term4)
+        totwtx1 = np.sum(data['wt'] * tmpl)
+        totwtx = totwtx1
+        totwtx2 = np.sum(data['wt'] * tmpl**2)
+        totwtxy = np.sum(data['wt'] * tmpl*data['y']) 
+        term1 = totwtxy
+        term2 = totwtx * totwty / totwt
+        term3 = totwtx2
+        term4 = totwtx**2 / totwt
+        amplitude = (term1-term2)/(term3-term4)
+        
+        # Calculate best mean magnitudes
+        # mean mag = (Y - amplitude * X)/W
+        constant = (totwty-amplitude*totwtx)/totwt
+            
+        # Calculate likelihood/chisq
+        wtresid = np.zeros(ndata,float)        
+        model1 = tmpl*amplitude+constant
+        resid = data['y']-model1
+        wtresid = resid**2 * data['wt']
+        lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['yerr']**2))
+
+    return amplitude,constant,tmpl,lnlkhood
+
+    
     def copy(self):
         """ Make a copy."""
         return copy.deepcopy(self)
@@ -1033,17 +1139,11 @@ class LinearModelSampler:
                 mcmc = np.percentile(emsamples[:, i], [16, 50, 84])
                 q = np.diff(mcmc)
                 print(r'%s = %.3f -%.3f/+%.3f' % (labels[i], pars_ml[i], q[0], q[1]))
-        
-            #fig = corner.corner(emsamples, labels=['Period','Offset'])
-            #plt.savefig(plotbase+'_corner.png',bbox_inches='tight')
-            #plt.close(fig)
-            #print('Corner plot saved to '+plotbase+'_corner.png')
     
             bestperiod = pars_ml[0]
             bestoffset = pars_ml[1]
             bestlnprob = emsampler.lnprobability[bestind[0],bestind[1]]
-            bestamplitude,bestconstant,tmpl,lnlkhood = solvelinearmodel(data,model,bestperiod,bestoffset,totwt,totwty)
-
+            bestamplitude,bestconstant,tmpl,lnlkhood = self.solve(bestperiod,bestoffset)
             
             print('Best period = %.4f' % bestperiod)
             print('Best offset = %.4f' % bestoffset)
@@ -1172,10 +1272,10 @@ class Sampler:
     Generic sampler of periodic signals.
 
     log_probability : function
-       Function that calculates the ln probability given (theta, x, y, err).  It must also
+       Function that calculates the ln probability given (theta, x, y, yerr).  It must also
          perform the marginalization over the non-linear parameters.
     args : tuple
-       Must at least contain (x, y, err).  It can additional contain other positional
+       Must at least contain (x, y, yerr).  It can additional contain other positional
           arguments to be passed to log_probability().
     kwargs : dict, optional
        Dictionary of keyword arguments to pass to log_probability() function.
@@ -1185,7 +1285,7 @@ class Sampler:
     def __init__(self,log_probability,args=None,kwargs=None):
         self._log_probability = log_probability
         self._args = args
-        # args should be (x,y,err, and other additional arguments to be passed to the functions)        
+        # args should be (x,y,yerr, and other additional arguments to be passed to the functions)        
         self._kwargs = kwargs
         # kwargs is a dictionary of additional keyword arguments to be passed to log_probability()
 
@@ -1198,7 +1298,7 @@ class Sampler:
 
         x = self._args[0]
         y = self._args[1]
-        err = self._args[2]
+        yerr = self._args[2]
         ndata = len(x)
         args = self._args
         kwargs = self._kwargs
@@ -1332,7 +1432,7 @@ class Sampler:
 
         x = self._args[0]
         y = self._args[1]
-        err = self._args[2]
+        yerr = self._args[2]
         ndata = len(x)
         bestperiod = self.bestperiod
         bestoffset = self.bestoffset
