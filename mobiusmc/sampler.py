@@ -219,8 +219,9 @@ class VariableSampler:
     ----------
     catalog : table
        Catalog of data points, just have mag, err, jd, band
-    template : table
-       Template information.  Need phase and mag columns.
+    template : table or function
+       Template information as a table with phase and mag columns or
+         function/method that takes phase array.
     ampratios : dict, optional
        Amplitude ratios.  Keys should be the unique band names
          and values should be the amplitue ratios.
@@ -486,7 +487,10 @@ class VariableSampler:
 
             # Get phase and template points
             phase = (data['jd'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
-            tmpl = np.interp(phase.ravel(),template['phase'],template['mag'])
+            if hasattr(template, '__call__'):            
+                tmpl = template(phase.ravel())
+            else:
+                tmpl = np.interp(phase.ravel(),template['phase'],template['mag'])
             tmpl = tmpl.reshape(ndata,npoints)
             
             # -- Find best fitting values for linear parameters ---
@@ -764,7 +768,10 @@ class VariableSampler:
         fig.set_figheight(10)
         fig.set_figwidth(10)
         phase = (data['jd']/bestperiod + bestoffset) % 1
-        tmpl = np.interp(phase,template['phase'],template['mag'])
+        if hasattr(template, '__call__'):            
+            tmpl = template(phase.ravel())
+        else:
+            tmpl = np.interp(phase,template['phase'],template['mag'])
         for i,b in enumerate(uband):
             ind = bandindex[b]
             tphase = (np.linspace(0,1,100)+bestoffset) % 1
@@ -803,8 +810,8 @@ class LinearModelSampler:
     Parameters
     ----------
     data : table
-       Catalog of data points, just have x, y, yerr.
-    model : function
+       Tuple with (x,y,yerr) or table with columns x, y and yerr.
+    model : function or table
        Model function or template with x and y columns.
     minerror : float, optional
        Minimum error to use.  Default is 0.02.
@@ -815,7 +822,14 @@ class LinearModelSampler:
 
         # Create the sampling for Period (pmin to pmax) and phase offset (0-1)
 
-        self.data = Table(data).copy()
+        if type(data) is tuple:
+            temp = np.zeros(len(data[0]),dtype=np.dtype([('x',float),('y',float),('yerr',float)]))
+            temp['x'] = data[0]
+            temp['y'] = data[1]
+            temp['yerr'] = data[2]            
+            self.data = Table(temp)
+        else:
+            self.data = Table(data).copy()
         for n in self.data.colnames:
             self.data[n].name = n.lower()   # change columns names to lower case
         self.model = model
