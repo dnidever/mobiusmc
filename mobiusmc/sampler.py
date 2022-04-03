@@ -372,13 +372,13 @@ class VariableSampler:
         totwtdict = self._totwtdict
         totwtydict = self._totwtydict
 
-        self._bestperiod = None
-        self._bestoffset = None
-        self._bestamplitude = None
-        self._bestmeanmag = None
-        self._bestlnprob = None        
-        self._samples = None
-        self._trials = None
+        self.bestperiod = None
+        self.bestoffset = None
+        self.bestamplitude = None
+        self.bestmeanmag = None
+        self.bestlnprob = None        
+        self.samples = None
+        self.trials = None
         
         # Period range
         if pmax is None:
@@ -732,8 +732,439 @@ class VariableSampler:
         fig.savefig(plotbase+'_best.png',bbox_inches='tight')
         plt.close(fig)
         print('Saving to '+plotbase+'_best.png')    
- 
+
+#--------------------------------------------------------------------------------------------------------------------
+
+
+class LinearModelSampler:
+    """
+    Class for doing sampling of periodic linear model (y=a*model(phase)+b)
+
+    Parameters
+    ----------
+    data : table
+       Catalog of data points, just have x, y, yerr.
+    model : function
+       Model function or template with x and y columns.
+    minerror : float, optional
+       Minimum error to use.  Default is 0.02.
     
+    """
+
+    def __init__(self,data,model,minerror=0.02):
+
+        # Create the sampling for Period (pmin to pmax) and phase offset (0-1)
+
+        self.data = Table(data).copy()
+        for n in self.data.colnames:
+            self.data[n].name = n.lower()   # change columns names to lower case
+        self.model = model
+        
+        # Add weights to internal catalog
+        self.data['wt'] = 1/np.maximum(self.data['yerr'],minerror)**2
+        data = self.data
+    
+        print(str(ndata)+' data points')
+        print('time baseline = %.2f' % (np.max(data['jd'])-np.min(data['jd'])))
+                
+        # Pre-calculate some terms that are constant
+        totwt = np.sum(data['wt'])
+        totwty = np.sum(data['wt']*data['y'])
+        self._totwt = totwt
+        self._totwty = totwty
+
+    def copy(self):
+        """ Make a copy."""
+        return copy.deepcopy(self)
+        
+    def run(self,pmin=0.1,pmax=None,offsetrange=None,minsample=128,npoints=200000,
+            unirefine=True,keepnegamp=False,verbose=True):
+        """
+        Run the sampler.
+
+        Parameters
+        ----------
+        pmin : float, optional
+           Minimum period to search in days.  Default is 0.1 days.
+        pmax : float, optional
+           Maximum period to search in days.  Default is 2 x time baseline.
+        offsetrange : list, optional
+           Two-element range of phase offset values to explore.  Default is [0,1].
+        minsample : int, optional
+           Mininum number of samples to return.  Default is 128.
+        npoints : int, optional
+           Number of points to use per loop.  Default is 200,000.
+        unirefine : boolean, optional
+           If a unimodal posterior distribution function, do a finer search
+             around the unimodal region.  Default is True.
+        keepnegamp : boolean, optional
+           Keep negative amplitudes.  Default is False.
+        verbose : boolean, optional
+           Print useful information to the screen.  Default is True.
+
+        Returns
+        -------
+        samples : astropy table
+           The Monte Carlo samples that passed rejection sampling.
+             period, offset, amplitude, lnlikelihood, lnprob, meanmaxBAND.
+        trials: astropy table
+           All of the trials period and phase offset positions tried.
+             period, offset, amplitude, lnlikelihood, lnprob, meanmaxBAND.
+        best : dictionary
+           Dictionary of best values (in ln probability) across all of
+             the trials: period, offset, amplitude, meanmag, lnprob.
+
+        Example
+        -------
+
+        samples,trials,best = vs.run()
+
+        """
+
+        data = self.data
+        ndata = self.ndata
+        model = self.model
+        totwt = self._totwt
+        totwty = self._totwty
+
+        self.bestperiod = None
+        self.bestoffset = None
+        self.bestamplitude = None
+        self.bestconstant = None
+        self.bestlnprob = None        
+        self.samples = None
+        self.trials = None
+        
+        # Period range
+        if pmax is None:
+            pmax = (np.max(data['x'])-np.min(data['x']))*2
+        lgminp = np.log10(pmin)
+        lgmaxp = np.log10(pmax)
+
+        if verbose:
+            print('Pmin = %.3f' % pmin)
+            print('Pmax = %.3f' % pmax)    
+        self.pmin = pmin
+        self.pmax = pmax
+
+        # Phase offset range
+        if offsetrange is not None:
+            offsetmin = offsetrange[0]
+            offsetmax = offsetrange[1]
+        else:
+            offsetmin = 0
+            offsetmax = 1
+        if offsetmin<0 or offsetmax>1:
+            raise ValueError('Phase offset range must be within 0 to 1')
+        if verbose:
+            print('Phase offset min = %.3f' % offsetmin)
+            print('Phase offset max = %.3f' % offsetmax)            
+        
+        # Loop until we have enough samples
+        nsamples = 0
+        samplelist = []
+        count = 0
+        dtt = [('period',float),('offset',float),('amplitude',float),('constant',float),('lnlikelihood',float),('lnprob',float)]
+        trials = None
+        while (nsamples<minsample):
+    
+            # Uniformly sample from log(pmin) to log(pmax)
+            period = np.random.rand(npoints)*(lgmaxp-lgminp)+lgminp    
+            period = 10**period
+            # Uniformly sample from offsetmin to offsetmax
+            offset = np.random.rand(npoints)*(offsetmax-offsetmin)+offsetmin
+
+
+            # Get phase and template points
+            phase = (data['x'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
+            if hasattr(model, '__call__'):            
+                tmpl = model(phase.ravel())
+            else:
+                tmpl = np.interp(phase.ravel(),model['x'],model['y'])
+            tmpl = tmpl.reshape(ndata,npoints)
+            
+            # -- Find best fitting values for linear parameters ---
+            # Calculate amplitude
+            # term1 = Sum of XY
+            # term2 = Sum of X * Y / W 
+            # term3 = Sum of X^2
+            # term4 = Sum of X * X / W
+            # amplitude = (term1 - term2)/(term3 - term4)
+            term1,term2,term3,term4 = 0,0,0,0
+            totwtx = np.sum(data['wt'].reshape(-1,1) * tmpl,axis=0)
+            totwtx2 = np.sum(data['wt'].reshape(-1,1) * tmpl**2,axis=0)
+            totwtxy = np.sum(data['wt'].reshape(-1,1) * tmpl * data['y'].reshape(-1,1),axis=0)      
+            term1 += totwtxy
+            term2 += totwtx * totwty / totwt
+            term3 += totwtx2
+            term4 += totwtx**2 / totwt
+            amplitude = (term1-term2)/(term3-term4)
+    
+            # Calculate cpmstant offfset
+            # mean mag = (Y - amplitude * X)/W
+            constant = (totwty-amplitude*totwtx)/totwt
+            
+            # Calculate likelihood/chisq
+            model = np.zeros((ndata,npoints),float)
+            resid = np.zeros((ndata,npoints),float)
+            wtresid = np.zeros((ndata,npoints),float)        
+            model1 = tmpl[ind,:]*ampratios[b]*amplitude+meanmag[b]
+            resid = data['y'].reshape(-1,1)-model1
+            wtresid = resid**2 * data['wt'].reshape(-1,1)
+            lnlikelihood = -0.5*np.sum(wtresid,axis=0)
+            lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['yerr']**2))
+
+            # Calculate ln probability = ln prior + ln likelihood
+            # use flat prior, divide by area
+            lnprior = np.ones(npoints,float) + np.log(1/(1.0*(lgmaxp-lgminp)))
+            lnprob = lnprior + lnlikelihood
+
+            # Save the information
+            trials1 = np.zeros(npoints,dtype=dtt)
+            trials1['period'] = period
+            trials1['offset'] = offset
+            trials1['amplitude'] = amplitude
+            trials1['constant'] = constant
+            trials1['lnlikelihood'] = lnlikelihood
+            trials1['lnprob'] = lnprob        
+            if trials is None:
+                trials = trials1
+            else:
+                trials = np.hstack((trials,trials1))
+                
+            # Rejection sampling
+            draw = np.random.rand(npoints)
+            if keepnegamp is False:
+                ind, = np.where((draw < np.exp(lnprob))  & (amplitude > 0))
+            else:
+                ind, = np.where(draw < np.exp(lnprob))                
+            if len(ind)>0:
+                for i in ind:
+                    samp = {'period':period[i],'offset':offset[i],'amplitude':amplitude[i],'constant':constant[i]}
+                    samp['lnlikelihood'] = lnlikelihood[i]
+                    samp['lnprob'] = lnprob[i]
+                    samplelist.append(samp)
+                nsamples += len(ind)
+
+            if verbose:
+                print(count+1,nsamples)
+            count += 1
+        
+        # Convert sample list to table
+        dt = [('period',float),('offset',float),('amplitude',float),('constant',float)]
+        dt += [('lnlikelihood',float),('lnprob',float)]
+        samples = np.zeros(len(samplelist),dtype=dt)
+        for i,samp in enumerate(samplelist):
+            samples['period'][i] = samp['period']
+            samples['offset'][i] = samp['offset']
+            samples['amplitude'][i] = samp['amplitude']
+            samples['constant'][i] = samp['constant']
+            samples['lnlikelihood'][i] = samp['lnlikelihood']
+            samples['lnprob'][i] = samp['lnprob']
+
+        # Convert to astropy tables
+        samples = Table(samples)
+        trials = Table(trials)
+        self.samples = samples
+        self.trials = trials
+
+        if keepnegamp is False:
+            posind, = np.where(trials['amplitude']>0)
+            best1 = np.argmax(trials['lnprob'][posind])
+            best = posind[best1]
+        else:
+            best = np.argmax(trials['lnprob'])                
+        bestperiod = trials['period'][best]
+        bestoffset = trials['offset'][best]
+        bestlnprob = trials['lnprob'][best]
+        bestamplitude = trials['amplitude'][best]
+        bestconstant = trials['constant'][best]
+        if verbose:
+            print('Best period = %.4f' % bestperiod)
+            print('Best offset = %.4f' % bestoffset)
+            print('Best amplitude = %.4f' % bestamplitude)
+            print('Best constant = %.4f' % bestconstant)            
+            print('Best lnprob = %.4f' % bestlnprob)
+        self.bestperiod = bestperiod
+        self.bestoffset = bestoffset
+        self.bestamplitude = bestamplitude
+        self.bestconstant = bestconstant        
+        self.bestlnprob = bestlnprob
+        
+        ntrials = npoints*count
+        if verbose:
+            print('ntrials = ',ntrials)
+    
+        
+        # If unimodal, run emcee
+        medperiod = np.median(samples['period'])
+        delta = (4*medperiod**2)/(2*np.pi*(np.max(data['jd'])-np.min(data['jd'])))
+        deltap = medperiod**2/(2*np.pi*(np.max(data['jd'])-np.min(data['jd'])))
+        rmsperiod = np.sqrt(np.mean((samples['period']-medperiod)**2))
+        unimodal = False
+        if rmsperiod < delta and unirefine:
+            print('Unimodal PDF, finer sampling')
+            unimodal = True
+
+            # Do NOT run emcee, just redo sampling with a tighter range on
+            # the unimodal region
+
+            import pdb; pdb.set_trace()
+            
+            # Run this method again with unirefine=False (otherwise infinite loop)
+            pmin2 = np.maximum(medperiod - 5*rmsperiod,0)
+            pmax2 = medperiod + 5*rmsperiod
+            medperiod = np.median(samples['offset'])
+            rmsperiod = np.sqrt(np.mean((samples['offset']-medoffset)**2))
+            offsetmin2 = np.maximum(medoffset-5*rmsoffset,0)
+            offsetmax2 = medoffset+5*rmsoffset
+            samples2,trial2,best2 = self.run(pmin2,pmax2,offsetrange=[offsetmin2,offsetmax2],
+                                             minsample=1024,npoints=200000,unirefine=False,
+                                             verbose=False)
+
+            import pdb; pdb.set_trace()
+
+            # The maximum likelihood parameters
+            bestind = np.unravel_index(np.argmax(emsampler.lnprobability),emsampler.lnprobability.shape)
+            pars_ml = emsampler.chain[bestind[0],bestind[1],:]
+        
+            labels = ['Period','Offset']
+            for i in range(ndim):
+                mcmc = np.percentile(emsamples[:, i], [16, 50, 84])
+                q = np.diff(mcmc)
+                print(r'%s = %.3f -%.3f/+%.3f' % (labels[i], pars_ml[i], q[0], q[1]))
+        
+            #fig = corner.corner(emsamples, labels=['Period','Offset'])
+            #plt.savefig(plotbase+'_corner.png',bbox_inches='tight')
+            #plt.close(fig)
+            #print('Corner plot saved to '+plotbase+'_corner.png')
+    
+            bestperiod = pars_ml[0]
+            bestoffset = pars_ml[1]
+            bestlnprob = emsampler.lnprobability[bestind[0],bestind[1]]
+            bestamplitude,bestconstant,tmpl,lnlkhood = solvelinearmodel(data,model,bestperiod,bestoffset,totwt,totwty)
+
+            
+            print('Best period = %.4f' % bestperiod)
+            print('Best offset = %.4f' % bestoffset)
+            print('Best amplitude = %.4f' % bestamplitude)
+            print('Best constant = %.4f' % bestconstant)            
+            print('Best lnprob = %.4f' % bestlnprob)
+
+            self.bestperiod = bestperiod
+            self.bestoffset = bestoffset
+            self.bestamplitude = bestamplitude
+            self.bestconstant = bestconstant
+            self.bestlnprob = bestlnprob
+
+        self.unimodal = unimodal
+
+        # Construct best dictionary
+        best = {'period':bestperiod,'phase':bestoffset,'amplitude':bestamplitude,'consant':bestconstant,'lnprob':bestlnprob}
+        
+        #import pdb; pdb.set_trace()
+
+        return samples, trials, best
+        
+
+    def plots(self,plotbase='sampler',bins=(200,200)):
+        """ Make the plots."""
+
+        data = self.data
+        ndata = self.ndata
+        model = self.model
+        bestperiod = self.bestperiod
+        bestoffset = self.bestoffset
+        bestamplitude = self.bestamplitude
+        bestconstant = self.bestconstant
+        bestlnprob = self.bestlnprob
+        samples = self.samples
+        trials = self.trials
+        
+        
+        # Make plots
+        matplotlib.use('Agg')
+        fig,ax = plt.subplots(2,1,constrained_layout=True)
+        fig.set_figheight(10)
+        fig.set_figwidth(10)
+        xr = [np.min(np.log10(trials['period'])),np.max(np.log10(trials['period']))]
+        # 2D density map
+        im,b,c,d = stats.binned_statistic_2d(trials['offset'],np.log10(trials['period']),trials['lnprob'],statistic='mean',bins=bins)
+        z1 = ax[0].imshow(im,aspect='auto',origin='lower',extent=(c[0],c[-1],b[0],b[-1]))
+        ax[0].set_xlabel('log(Period)')
+        ax[0].set_ylabel('Phase Offset')
+        ax[0].set_xlim(xr)
+        plt.colorbar(z1,ax=ax[0],label='Mean ln(Prob)')
+        # Period histogram
+        hist,a,b = stats.binned_statistic(np.log10(trials['period']),trials['lnprob'],statistic='mean',bins=1000)
+        ax[1].plot(a[0:-1],hist)
+        ax[1].set_xlabel('log(Period)')
+        ax[1].set_ylabel('Mean ln(Prob)')
+        ax[1].set_xlim(xr)        
+        fig.savefig(plotbase+'_trials.png',bbox_inches='tight')
+        plt.close(fig)
+        print('Saving to '+plotbase+'_trials.png')
+
+        # Plot offset vs. period color-coded by lnprob
+        # plot amplitude vs. period color-coded by lnprob
+        fig,ax = plt.subplots(3,1,constrained_layout=True)
+        fig.set_figheight(10)
+        fig.set_figwidth(10)
+        # Plot offset vs. period color-coded by lnprob
+        z1 = ax[0].scatter(np.log10(samples['period']),samples['offset'],c=samples['lnprob'])
+        ax[0].set_xlabel('log(Period)')
+        ax[0].set_ylabel('Phase Offset')
+        plt.colorbar(z1,ax=ax[0],label='ln(Prob)')
+        # Plot amplitude vs. period color-coded by lnprob
+        z2 = ax[1].scatter(np.log10(samples['period']),samples['amplitude'],c=samples['lnprob'])
+        ax[1].set_xlabel('log(Period)')
+        ax[1].set_ylabel('Amplitude')
+        plt.colorbar(z2,ax=ax[1],label='ln(Prob)')
+        # Sum of lnprob
+        hist2,a2,b2 = stats.binned_statistic(np.log10(samples['period']),samples['lnprob'],statistic='sum',bins=200)
+        ax[2].plot(a2[0:-1],hist2)
+        ax[2].set_xlabel('log(Period)')
+        ax[2].set_ylabel('Sum ln(Prob)')
+        fig.savefig(plotbase+'_samples.png',bbox_inches='tight')
+        plt.close(fig)
+        print('Saving to '+plotbase+'_samples.png')
+        
+        # Plot best-fit model
+        # one panel per band, mag vs. phase
+        fig = plt.figure(figsize=(10,10))
+        phase = (data['x']/bestperiod + bestoffset) % 1
+        if hasattr(model, '__call__'):
+            tmpl = model(phase)
+        else:
+            tmpl = np.interp(phase,template['x'],template['y'])            
+        tphase = (np.linspace(0,1,100)+bestoffset) % 1
+        si = np.argsort(tphase)
+        tphase = tphase[si]
+        if hasattr(model, '__call__'):            
+            tmag = model(tphase)
+        else:
+            tmag = np.interp(tphase,template['x'],template['y'])
+        model = tmag*bestamplitude+bestconstant
+        dd = np.hstack((data['y'],model))
+        yr = [np.max(dd)+0.05*dln.valrange(dd),np.min(dd)-0.30*dln.valrange(dd)]
+        plt.plot(tphase,model,c='blue',zorder=1)        
+        plt.errorbar(phase[ind],data['mag'][ind],yerr=data['err'][ind],c='gray',fmt='none',zorder=2)
+        plt.scatter(phase[ind],data['mag'][ind],c='black',zorder=3)
+        plt.annotate(txt,xy=(0.02,yr[1]+0.10*dln.valrange(dd)),ha='left')
+        plt.xlabel('Phase')
+        plt.ylabel('Magnitude')
+        plt.xlim(0,1)
+        plt.ylim(yr)
+        plt.set_title('Period=%.3f  Offset=%.3f  Amplitude=%.3f  Constant=%.3f  ln(Prob)=%.3f' %
+                      (bestperiod,bestoffset,bestamplitude,bestconstant,bestlnprob))
+        fig.savefig(plotbase+'_best.png',bbox_inches='tight')
+        plt.close(fig)
+        print('Saving to '+plotbase+'_best.png')    
+ 
+
+        
+#--------------------------------------------------------------------------------------------------------------------
+        
 
 class Sampler:
     """
