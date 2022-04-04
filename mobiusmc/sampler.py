@@ -315,9 +315,37 @@ class VariableSampler:
         self._totwtdict = totwtdict
         self._totwtydict = totwtydict
 
-    def solve(period,offset):
-        """ Solve variable star for a single period/phase value."""
+    def solve(period,offset,amplitude=None):
+        """
+        Solve for a given period and offset.
 
+        Parameters
+        ----------
+        period : float or array
+          Period as scalar float or array.
+        offset : float or array
+          Phase offset as scalar float or array.
+        amplitude : float or array, optional
+          Amplitude.  If this is not input, then the best amplitude
+            using linear least squares is derived.
+
+        Returns
+        -------
+        amplitude : float or array
+          The amplitudes.
+        constant : float or array
+          The best constant offset.
+        lnlikelihood : float or array
+          The log likelihood.
+
+        Example
+        -------
+
+        amp,const,lnlkhood = samp.solve(period,offset)
+
+        """
+
+        nperiod = np.array(period).size
         data = self.data
         template = self.template
         bandindex = self._bandindex
@@ -325,12 +353,14 @@ class VariableSampler:
         totwtydict = self._totwtydict
         
         ndata = len(data)
-        
-        # Calculate phase for each data point
-        phase = (data['jd']/period + offset) % 1
-            
-        # Calculate template values for this set of period and phase
-        tmpl = np.interp(phase,template['phase'],template['mag'])
+
+        # Get phase and template points
+        phase = (data['jd'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
+        if hasattr(template, '__call__'):            
+            tmpl = template(phase.ravel())
+        else:
+            tmpl = np.interp(phase.ravel(),template['phase'],template['mag'])
+        tmpl = tmpl.reshape(ndata,nperiod)
             
         # -- Find best fitting values for linear parameters ---
         # Calculate amplitude
@@ -339,23 +369,34 @@ class VariableSampler:
         # term3 = Sum of X^2
         # term4 = Sum of X * X / W
         # amplitude = (term1 - term2)/(term3 - term4)
-        term1 = 0.0
-        term2 = 0.0
-        term3 = 0.0
-        term4 = 0.0
-        totwtxdict = {}
-        for b in bandindex.keys():
-            ind = bandindex[b]
-            totwtx1 = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b])
-            totwtxdict[b] = totwtx1
-            totwtx2 = np.sum(data['wt'][ind] * (tmpl[ind]*ampratios[b])**2)
-            totwtxy = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b] * data['mag'][ind])      
-            term1 += totwtxy
-            term2 += totwtx1 * totwtydict[b] / totwtdict[b]
-            term3 += totwtx2
-            term4 += totwtx1**2 / totwtdict[b]
-        amplitude = (term1-term2)/(term3-term4)
-            
+        if amplitude is None:
+            term1,term2,term3,term4 = 0,0,0,0
+            if nperiod==1:
+                for b in bandindex.keys():
+                    ind = bandindex[b]
+                    totwtx1 = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b])
+                    totwtxdict[b] = totwtx1
+                    totwtx2 = np.sum(data['wt'][ind] * (tmpl[ind]*ampratios[b])**2)
+                    totwtxy = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b] * data['mag'][ind])      
+                    term1 += totwtxy
+                    term2 += totwtx1 * totwtydict[b] / totwtdict[b]
+                    term3 += totwtx2
+                    term4 += totwtx1**2 / totwtdict[b]
+                amplitude = (term1-term2)/(term3-term4)
+            else:
+                totwtxdict = {}
+                for b in uband:
+                    ind = bandindex[b]
+                    totwtx1 = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b],axis=0)
+                    totwtxdict[b] = totwtx1
+                    totwtx2 = np.sum(data['wt'][ind].reshape(-1,1) * (tmpl[ind,:]*ampratios[b])**2,axis=0)
+                    totwtxy = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b] * data['mag'][ind].reshape(-1,1),axis=0)      
+                    term1 += totwtxy
+                    term2 += totwtx1 * totwtydict[b] / totwtdict[b]
+                    term3 += totwtx2
+                    term4 += totwtx1**2 / totwtdict[b]
+                amplitude = (term1-term2)/(term3-term4)
+        
         # Calculate best mean magnitudes
         # mean mag = (Y - amplitude * X)/W
         meanmag = {}
@@ -364,18 +405,32 @@ class VariableSampler:
             meanmag[b] = meanmag1
             
         # Calculate likelihood/chisq
-        model = np.zeros(ndata,float)
-        resid = np.zeros(ndata,float)
-        wtresid = np.zeros(ndata,float)        
-        for b in bandindex.keys():
-            ind = bandindex[b]          
-            model1 = tmpl[ind]*ampratios[b]*amplitude+meanmag[b]
-            model[ind] = model1
-            resid[ind] = data['mag'][ind]-model1
-            wtresid[ind] = resid[ind]**2 * data['wt'][ind]
-        lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['err']**2))
+        if nperiod==1:
+            model = np.zeros(ndata,float)
+            resid = np.zeros(ndata,float)
+            wtresid = np.zeros(ndata,float)        
+            for b in bandindex.keys():
+                ind = bandindex[b]          
+                model1 = tmpl[ind]*ampratios[b]*amplitude+meanmag[b]
+                model[ind] = model1
+                resid[ind] = data['mag'][ind]-model1
+                wtresid[ind] = resid[ind]**2 * data['wt'][ind]
+            lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['err']**2))
+        else:
+            model = np.zeros((ndata,npoints),float)
+            resid = np.zeros((ndata,npoints),float)
+            wtresid = np.zeros((ndata,npoints),float)        
+            for b in uband:
+                ind = bandindex[b]
+                model1 = tmpl[ind,:]*ampratios[b]*amplitude.reshape(1,-1)+meanmag[b].reshape(1,-1)
+                model[ind,:] = model1
+                resid[ind,:] = data['mag'][ind].reshape(-1,1)-model1
+                wtresid[ind,:] = resid[ind,:]**2 * data['wt'][ind].reshape(-1,1)
+            lnlikelihood = -0.5*np.sum(wtresid,axis=0)
+            lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['err']**2))
 
-        return amplitude,meanmag,model,lnlkhood
+        return amplitude,meanmag,lnlikelihood
+    
               
     def copy(self):
         """ Make a copy."""
@@ -484,55 +539,8 @@ class VariableSampler:
             # Uniformly sample from offsetmin to offsetmax
             offset = np.random.rand(npoints)*(offsetmax-offsetmin)+offsetmin
 
-
-            # Get phase and template points
-            phase = (data['jd'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
-            if hasattr(template, '__call__'):            
-                tmpl = template(phase.ravel())
-            else:
-                tmpl = np.interp(phase.ravel(),template['phase'],template['mag'])
-            tmpl = tmpl.reshape(ndata,npoints)
-            
-            # -- Find best fitting values for linear parameters ---
-            # Calculate amplitude
-            # term1 = Sum of XY
-            # term2 = Sum of X * Y / W 
-            # term3 = Sum of X^2
-            # term4 = Sum of X * X / W
-            # amplitude = (term1 - term2)/(term3 - term4)
-            term1,term2,term3,term4 = 0,0,0,0
-            totwtxdict = {}
-            for b in uband:
-                ind = bandindex[b]
-                totwtx1 = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b],axis=0)
-                totwtxdict[b] = totwtx1
-                totwtx2 = np.sum(data['wt'][ind].reshape(-1,1) * (tmpl[ind,:]*ampratios[b])**2,axis=0)
-                totwtxy = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b] * data['mag'][ind].reshape(-1,1),axis=0)      
-                term1 += totwtxy
-                term2 += totwtx1 * totwtydict[b] / totwtdict[b]
-                term3 += totwtx2
-                term4 += totwtx1**2 / totwtdict[b]
-            amplitude = (term1-term2)/(term3-term4)
-    
-            # Calculate best mean magnitudes
-            # mean mag = (Y - amplitude * X)/W
-            meanmag = {}
-            for b in uband:
-                meanmag1 = (totwtydict[b] - amplitude * totwtxdict[b])/totwtdict[b]
-                meanmag[b] = meanmag1
-            
-            # Calculate likelihood/chisq
-            model = np.zeros((ndata,npoints),float)
-            resid = np.zeros((ndata,npoints),float)
-            wtresid = np.zeros((ndata,npoints),float)        
-            for b in uband:
-                ind = bandindex[b]
-                model1 = tmpl[ind,:]*ampratios[b]*amplitude+meanmag[b]
-                model[ind,:] = model1
-                resid[ind,:] = data['mag'][ind].reshape(-1,1)-model1
-                wtresid[ind,:] = resid[ind,:]**2 * data['wt'][ind].reshape(-1,1)
-            lnlikelihood = -0.5*np.sum(wtresid,axis=0)
-            lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['err']**2))
+            # Solve for amplitude, constant and lnlikelihood
+            amplitude,meanmag,lnlikelihood = self.solve(period,offset)
 
             # Calculate ln probability = ln prior + ln likelihood
             # use flat prior, divide by area
@@ -647,6 +655,7 @@ class VariableSampler:
             rmsperiod = np.sqrt(np.mean((samples['offset']-medoffset)**2))
             offsetmin2 = np.maximum(medoffset-5*rmsoffset,0)
             offsetmax2 = medoffset+5*rmsoffset
+            #amplitude,meanmag,lnlikelihood = self.solve()
             samples2,trial2,best2 = self.run(pmin2,pmax2,offsetrange=[offsetmin2,offsetmax2],
                                              minsample=1024,npoints=200000,unirefine=False,
                                              verbose=False)
@@ -847,20 +856,53 @@ class LinearModelSampler:
         self._totwt = totwt
         self._totwty = totwty
 
-    def solve(self,period,offset):
-        """ Solve for a single period and offset."""
+    def solve(self,period,offset,amplitude=None):
+        """ 
+        Solve for a given period and offset.
+
+        Parameters
+        ----------
+        period : float or array
+          Period as scalar float or array.
+        offset : float or array
+          Phase offset as scalar float or array.
+        amplitude : float or array, optional
+          Amplitude.  If this is not input, then the best amplitude
+            using linear least squares is derived.
+
+        Returns
+        -------
+        amplitude : float or array
+          The amplitudes.
+        constant : float or array
+          The best constant offset.
+        lnlikelihood : float or array
+          The log likelihood.
+
+        Example
+        -------
+
+        amp,const,lnlkhood = samp.solve(period,offset)
+
+        """
 
         data = self.data
         ndata = len(data)
+        nperiod = np.array(period).size
         
         # Calculate phase for each data point
-        phase = (data['x']/period + offset) % 1
+        if nperiod==1:
+            phase = (data['x']/period + offset) % 1
+        else:
+            phase = (data['x'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
             
         # Calculate template values for this set of period and phase
         if hasattr(model, '__call__'):            
             tmpl = model(phase)
         else:
             tmpl = np.interp(phase,model['x'],model['y'])
+        if nperiod>1:
+            tmpl = tmpl.reshape(ndata,nperiod)
             
         # -- Find best fitting values for linear parameters ---
         # Calculate amplitude
@@ -869,28 +911,46 @@ class LinearModelSampler:
         # term3 = Sum of X^2
         # term4 = Sum of X * X / W
         # amplitude = (term1 - term2)/(term3 - term4)
-        totwtx1 = np.sum(data['wt'] * tmpl)
-        totwtx = totwtx1
-        totwtx2 = np.sum(data['wt'] * tmpl**2)
-        totwtxy = np.sum(data['wt'] * tmpl*data['y']) 
-        term1 = totwtxy
-        term2 = totwtx * totwty / totwt
-        term3 = totwtx2
-        term4 = totwtx**2 / totwt
-        amplitude = (term1-term2)/(term3-term4)
-        
-        # Calculate best mean magnitudes
-        # mean mag = (Y - amplitude * X)/W
-        constant = (totwty-amplitude*totwtx)/totwt
-            
-        # Calculate likelihood/chisq
-        wtresid = np.zeros(ndata,float)        
-        model1 = tmpl*amplitude+constant
-        resid = data['y']-model1
-        wtresid = resid**2 * data['wt']
-        lnlkhood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['yerr']**2))
+        if amplitude is None:
+            if nperiod==1:
+                totwtx1 = np.sum(data['wt'] * tmpl)
+                totwtx = totwtx1
+                totwtx2 = np.sum(data['wt'] * tmpl**2)
+                totwtxy = np.sum(data['wt'] * tmpl*data['y']) 
+                term1 = totwtxy
+                term2 = totwtx * totwty / totwt
+                term3 = totwtx2
+                term4 = totwtx**2 / totwt
+                amplitude = (term1-term2)/(term3-term4)
+            else:
+                totwtx = np.sum(data['wt'].reshape(-1,1) * tmpl,axis=0)
+                totwtx2 = np.sum(data['wt'].reshape(-1,1) * tmpl**2,axis=0)
+                totwtxy = np.sum(data['wt'].reshape(-1,1) * tmpl * data['y'].reshape(-1,1),axis=0)      
+                term1 += totwtxy
+                term2 += totwtx * totwty / totwt
+                term3 += totwtx2
+                term4 += totwtx**2 / totwt
+                amplitude = (term1-term2)/(term3-term4)
 
-        return amplitude,constant,tmpl,lnlkhood
+        
+        # Calculate best constant value
+        # constant = (Y - amplitude * X)/W
+        constant = (totwty-amplitude*totwtx)/totwt
+
+        # Calculate likelihood
+        if nperiod==1:
+            model1 = tmpl*amplitude+constant
+            resid = data['y']-model1
+            wtresid = resid**2 * data['wt']
+            lnlikelihood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['yerr']**2))
+        else:
+            model1 = tmpl*amplitude.reshape(1,-1)+constant.reshape(1,-1)
+            resid = data['y'].reshape(-1,1)-model1
+            wtresid = resid**2 * data['wt'].reshape(-1,1)
+            lnlikelihood = -0.5*np.sum(wtresid,axis=0)
+            lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['yerr']**2))
+
+        return amplitude,constant,lnlikelihood
 
     
     def copy(self):
@@ -994,45 +1054,8 @@ class LinearModelSampler:
             # Uniformly sample from offsetmin to offsetmax
             offset = np.random.rand(npoints)*(offsetmax-offsetmin)+offsetmin
 
-
-            # Get phase and template points
-            phase = (data['x'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
-            if hasattr(model, '__call__'):            
-                tmpl = model(phase.ravel())
-            else:
-                tmpl = np.interp(phase.ravel(),model['x'],model['y'])
-            tmpl = tmpl.reshape(ndata,npoints)
-            
-            # -- Find best fitting values for linear parameters ---
-            # Calculate amplitude
-            # term1 = Sum of XY
-            # term2 = Sum of X * Y / W 
-            # term3 = Sum of X^2
-            # term4 = Sum of X * X / W
-            # amplitude = (term1 - term2)/(term3 - term4)
-            term1,term2,term3,term4 = 0,0,0,0
-            totwtx = np.sum(data['wt'].reshape(-1,1) * tmpl,axis=0)
-            totwtx2 = np.sum(data['wt'].reshape(-1,1) * tmpl**2,axis=0)
-            totwtxy = np.sum(data['wt'].reshape(-1,1) * tmpl * data['y'].reshape(-1,1),axis=0)      
-            term1 += totwtxy
-            term2 += totwtx * totwty / totwt
-            term3 += totwtx2
-            term4 += totwtx**2 / totwt
-            amplitude = (term1-term2)/(term3-term4)
-    
-            # Calculate cpmstant offfset
-            # mean mag = (Y - amplitude * X)/W
-            constant = (totwty-amplitude*totwtx)/totwt
-            
-            # Calculate likelihood/chisq
-            model = np.zeros((ndata,npoints),float)
-            resid = np.zeros((ndata,npoints),float)
-            wtresid = np.zeros((ndata,npoints),float)        
-            model1 = tmpl[ind,:]*ampratios[b]*amplitude+meanmag[b]
-            resid = data['y'].reshape(-1,1)-model1
-            wtresid = resid**2 * data['wt'].reshape(-1,1)
-            lnlikelihood = -0.5*np.sum(wtresid,axis=0)
-            lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['yerr']**2))
+            # Solve for amplitude, constant and lnlikelihood
+            amplitude,constant,lnlikelihood = self.solve(period,offset)
 
             # Calculate ln probability = ln prior + ln likelihood
             # use flat prior, divide by area
@@ -1130,6 +1153,8 @@ class LinearModelSampler:
             # the unimodal region
 
             import pdb; pdb.set_trace()
+
+            # rejection sampling of period, phase offset and amplitude!!
             
             # Run this method again with unirefine=False (otherwise infinite loop)
             pmin2 = np.maximum(medperiod - 5*rmsperiod,0)
