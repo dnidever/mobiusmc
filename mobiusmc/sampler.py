@@ -22,129 +22,6 @@ import emcee
 import corner
 
 
-def log_likelihood_variable(theta,x,y,err,data=None,template=None,ampratios=None,bandindex=None,totwtdict=None,totwtydict=None,**kwargs):
-
-    try:
-        dum = data['wt']
-    except:
-        data = Table(data)
-        data['wt'] = 1/data['err']**2
-    
-    if bandindex is None:
-        # Get band index
-        uband = np.unique(data['band'])
-        nband = len(uband)
-        bandindex = {}
-        for i,b in enumerate(uband):
-            ind, = np.where(data['band']==b)
-            bandindex[b] = ind     
-    if totwtdict is None or totwtydict is None:
-        # Pre-calculate some terms that are constant
-        totwtdict = {}
-        totwtydict = {}
-        for b in uband:
-            ind = bandindex[b]
-            totwtdict[b] = np.sum(data['wt'][ind])
-            totwtydict[b] = np.sum(data['wt'][ind] * data['mag'][ind])
-            
-    
-    period, offset = theta
-    ndata = len(data)
-    
-    # Calculate phase for each data point
-    if period.size > 1:
-        # Get phase and template points
-        phase = (data['jd'].reshape(-1,1)/period.reshape(1,-1) + offset.reshape(1,-1)) % 1
-        tmpl = np.interp(phase.ravel(),template['phase'],template['mag'])
-        tmpl = tmpl.reshape(ndata,period.size)
-    else:
-        phase = (data['jd']/period + offset) % 1            
-        # Calculate template values for this set of period and phase
-        tmpl = np.interp(phase,template['phase'],template['mag'])
-            
-    # -- Find best fitting values for linear parameters ---
-    # Calculate amplitude
-    # term1 = Sum of XY
-    # term2 = Sum of X * Y / W 
-    # term3 = Sum of X^2
-    # term4 = Sum of X * X / W
-    # amplitude = (term1 - term2)/(term3 - term4)
-    term1 = 0.0
-    term2 = 0.0
-    term3 = 0.0
-    term4 = 0.0
-    totwtxdict = {}
-    for b in bandindex.keys():
-        ind = bandindex[b]
-        if period.size > 1:
-            totwtx1 = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b],axis=0)
-            totwtx2 = np.sum(data['wt'][ind].reshape(-1,1) * (tmpl[ind,:]*ampratios[b])**2,axis=0)
-            totwtxy = np.sum(data['wt'][ind].reshape(-1,1) * tmpl[ind,:]*ampratios[b] * data['mag'][ind].reshape(-1,1),axis=0)
-        else:
-            totwtx1 = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b])
-            totwtx2 = np.sum(data['wt'][ind] * (tmpl[ind]*ampratios[b])**2)
-            totwtxy = np.sum(data['wt'][ind] * tmpl[ind]*ampratios[b] * data['mag'][ind])                  
-        totwtxdict[b] = totwtx1
-        term1 += totwtxy
-        term2 += totwtx1 * totwtydict[b] / totwtdict[b]
-        term3 += totwtx2
-        term4 += totwtx1**2 / totwtdict[b]
-    amplitude = (term1-term2)/(term3-term4)
-            
-    # Calculate best mean magnitudes
-    # mean mag = (Y - amplitude * X)/W
-    meanmag = {}
-    for b in bandindex.keys():
-        meanmag1 = (totwtydict[b] - amplitude * totwtxdict[b])/totwtdict[b]
-        meanmag[b] = meanmag1
-            
-    # Calculate likelihood/chisq
-    if period.size > 1:
-        model = np.zeros((ndata,period.size),float)
-        resid = np.zeros((ndata,period.size),float)
-        wtresid = np.zeros((ndata,period.size),float)
-        for b in uband:
-            ind = bandindex[b]
-            model1 = tmpl[ind,:]*ampratios[b]*amplitude+meanmag[b]
-            model[ind,:] = model1
-            resid[ind,:] = data['mag'][ind].reshape(-1,1)-model1
-            wtresid[ind,:] = resid[ind,:]**2 * data['wt'][ind].reshape(-1,1)
-        lnlikelihood = -0.5*np.sum(wtresid,axis=0)
-        lnlikelihood += -0.5*np.sum(np.log(2*np.pi*data['err']**2))
-    else:
-        model = np.zeros(ndata,float)
-        resid = np.zeros(ndata,float)
-        wtresid = np.zeros(ndata,float)        
-        for b in bandindex.keys():
-            ind = bandindex[b]
-            model1 = tmpl[ind]*ampratios[b]*amplitude+meanmag[b]
-            model[ind] = model1
-            resid[ind] = data['mag'][ind]-model1
-            wtresid[ind] = resid[ind]**2 * data['wt'][ind]
-        lnlikelihood = -0.5*np.sum(wtresid + np.log(2*np.pi*data['err']**2))
-
-    return lnlikelihood
-
-#def log_likelihood(theta, x, y, yerr):
-#    m, b, log_f = theta
-#    model = m * x + b
-#    sigma2 = yerr ** 2 + model ** 2 * np.exp(2 * log_f)
-#    return -0.5 * np.sum((y - model) ** 2 / sigma2 + np.log(sigma2))
-
-def log_prior_variable(theta,prange=None):
-    period = theta[0]
-    pmin = np.min(period)
-    pmax = np.max(period)
-    lnprior = np.log(1/(1.0*(np.log10(pmax)-np.log10(pmin))))
-    return lnprior
-
-def log_probability_variable(theta, x, y, yerr, *args, **kwargs):
-    lp = log_prior_variable(theta)
-    #if not np.isfinite(lp):
-    #    return -np.inf
-    return lp + log_likelihood_variable(theta, x, y, yerr, *args, **kwargs)
-
-
 class VariableSampler:
     """
     Class for doing sampling of variable star lightcurve ddata.
@@ -177,10 +54,10 @@ class VariableSampler:
         for n in self.template.colnames:
             self.template[n].name = n.lower()   # change columns names to lower case        
 
-        # filter not band input
+        # "filter" not "band" input
         if 'band' not in self.data.colnames and 'filter' in self.data.colnames:
             self.data['band'] = self.data['filter']
-        # mjd not jd input
+        # "mjd" not "jd" input
         if 'jd' not in self.data.colnames and 'mjd' in self.data.colnames:
             self.data['jd'] = self.data['mjd']
         # Check that the catalog and template have the columns that we need
@@ -196,7 +73,10 @@ class VariableSampler:
                 missingcols.append(n)
         if len(missingcols)>0:
             raise ValueError('Missing template required columns: '+', '.join(missingcols))        
-        
+
+        # Make sure the data are sorted by JD
+        si = np.argsort(self.data['jd'])
+        self.data = self.data[si]
         
         # Add weights to internal catalog
         self.data['wt'] = 1/np.maximum(self.data['err'],minerror)**2
@@ -653,14 +533,14 @@ class VariableSampler:
             self.trials = trials
 
             # Get best values
-            best1 = np.argmax(trials['lnprob'])
-            bestperiod = trials['period'][best1]
-            bestoffset = trials['offset'][best1]
-            bestlnprob = trials['lnprob'][best1]
-            bestamplitude = trials['amplitude'][best1]
+            best = np.argmax(trials['lnprob'])
+            bestperiod = trials['period'][best]
+            bestoffset = trials['offset'][best]
+            bestlnprob = trials['lnprob'][best]
+            bestamplitude = trials['amplitude'][best]
             bestmeanmag = {}
             for b in uband:
-                bestmeanmag[b] = trials['mag'+str(b)][best1]
+                bestmeanmag[b] = trials['mag'+str(b)][best]
             if verbose:
                 print('Best period = %.4f' % bestperiod)
                 print('Best offset = %.4f' % bestoffset)
@@ -730,21 +610,25 @@ class VariableSampler:
         fig,ax = plt.subplots(3,1,constrained_layout=True)
         fig.set_figheight(10)
         fig.set_figwidth(10)
+        xr = [np.min(samples['period']),np.max(samples['period'])]        
         # Plot offset vs. period color-coded by lnprob
         z1 = ax[0].scatter(np.log10(samples['period']),samples['offset'],c=samples['lnprob'])
         ax[0].set_xlabel('log(Period)')
         ax[0].set_ylabel('Phase Offset')
+        ax[0].set_xlim(xr)
         plt.colorbar(z1,ax=ax[0],label='ln(Prob)')
         # Plot amplitude vs. period color-coded by lnprob
         z2 = ax[1].scatter(np.log10(samples['period']),samples['amplitude'],c=samples['lnprob'])
         ax[1].set_xlabel('log(Period)')
         ax[1].set_ylabel('Amplitude')
+        ax[1].set_xlim(xr)        
         plt.colorbar(z2,ax=ax[1],label='ln(Prob)')
         # Sum of lnprob
-        hist2,a2,b2 = stats.binned_statistic(np.log10(samples['period']),samples['lnprob'],statistic='sum',bins=200)
+        hist2,a2,b2 = stats.binned_statistic(np.log10(samples['period']),samples['lnprob'],statistic='sum',bins=50)
         ax[2].plot(a2[0:-1],hist2)
         ax[2].set_xlabel('log(Period)')
         ax[2].set_ylabel('Sum ln(Prob)')
+        ax[2].set_xlim(xr)        
         fig.savefig(plotbase+'_samples.png',bbox_inches='tight')
         plt.close(fig)
         print('Saving to '+plotbase+'_samples.png')
@@ -825,7 +709,11 @@ class LinearModelSampler:
         # Add weights to internal catalog
         self.data['wt'] = 1/np.maximum(self.data['yerr'],minerror)**2
         data = self.data
-    
+
+        # Make sure the data are sorted by x
+        si = np.argsort(self.data['x'])
+        self.data = self.data[si]
+        
         print(str(ndata)+' data points')
         print('time baseline = %.2f' % (np.max(data['jd'])-np.min(data['jd'])))
                 
@@ -1185,12 +1073,12 @@ class LinearModelSampler:
             self.trials = trials
 
             # Get best values
-            best1 = np.argmax(trials['lnprob'])
-            bestperiod = trials['period'][best1]
-            bestoffset = trials['offset'][best1]
-            bestamplitude = trials['amplitude'][best1]
-            bestconstant = trials['constant'][best1]
-            bestlnprob = trials['lnprob'][best1]
+            best = np.argmax(trials['lnprob'])
+            bestperiod = trials['period'][best]
+            bestoffset = trials['offset'][best]
+            bestamplitude = trials['amplitude'][best]
+            bestconstant = trials['constant'][best]
+            bestlnprob = trials['lnprob'][best]
             if verbose:
                 print('Best period = %.4f' % bestperiod)
                 print('Best offset = %.4f' % bestoffset)
@@ -1255,21 +1143,25 @@ class LinearModelSampler:
         fig,ax = plt.subplots(3,1,constrained_layout=True)
         fig.set_figheight(10)
         fig.set_figwidth(10)
+        xr = [np.min(samples['period']),np.max(samples['period'])]
         # Plot offset vs. period color-coded by lnprob
         z1 = ax[0].scatter(np.log10(samples['period']),samples['offset'],c=samples['lnprob'])
         ax[0].set_xlabel('log(Period)')
         ax[0].set_ylabel('Phase Offset')
+        ax[0].set_xlim(xr)
         plt.colorbar(z1,ax=ax[0],label='ln(Prob)')
         # Plot amplitude vs. period color-coded by lnprob
         z2 = ax[1].scatter(np.log10(samples['period']),samples['amplitude'],c=samples['lnprob'])
         ax[1].set_xlabel('log(Period)')
         ax[1].set_ylabel('Amplitude')
+        ax[1].set_xlim(xr)        
         plt.colorbar(z2,ax=ax[1],label='ln(Prob)')
         # Sum of lnprob
-        hist2,a2,b2 = stats.binned_statistic(np.log10(samples['period']),samples['lnprob'],statistic='sum',bins=200)
+        hist2,a2,b2 = stats.binned_statistic(np.log10(samples['period']),samples['lnprob'],statistic='sum',bins=50)
         ax[2].plot(a2[0:-1],hist2)
         ax[2].set_xlabel('log(Period)')
         ax[2].set_ylabel('Sum ln(Prob)')
+        ax[2].set_xlim(xr)        
         fig.savefig(plotbase+'_samples.png',bbox_inches='tight')
         plt.close(fig)
         print('Saving to '+plotbase+'_samples.png')
@@ -1316,21 +1208,21 @@ class Sampler:
 
     Generic sampler of periodic signals.
 
-    log_probability : function
-       Function that calculates the ln probability given (theta, x, y, yerr).  It must also
-         perform the marginalization over the non-linear parameters.
     args : tuple
        Must at least contain (x, y, yerr).  It can additional contain other positional
           arguments to be passed to log_probability().
+    log_probability : function
+       Function that calculates the ln probability given (theta, x, y, yerr).  It must also
+         perform the marginalization over the non-linear parameters.
     kwargs : dict, optional
        Dictionary of keyword arguments to pass to log_probability() function.
 
     """
     
-    def __init__(self,log_probability,args=None,kwargs=None):
-        self._log_probability = log_probability
+    def __init__(self,args,log_probability,kwargs=None):
         self._args = args
         # args should be (x,y,yerr, and other additional arguments to be passed to the functions)        
+        self._log_probability = log_probability
         self._kwargs = kwargs
         # kwargs is a dictionary of additional keyword arguments to be passed to log_probability()
 
