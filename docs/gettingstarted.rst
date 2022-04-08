@@ -109,6 +109,8 @@ Variable Star Sampler
 
 The :class:`~mobiusmc.sampler.VariableSampler` class is designed to sample a variable star lightcurve (often in multiple bands) with a single template (same for all bands).  The software fits only a single amplitude of the template, but in reality the amplitude varies from band to band (larger in bluer bands, smaller in redder bands).  Therefore, it is good to input the amplitude ratios dictionary.  The software also determined the mean magnitude in each band.
 
+:class:`~mobiusmc.sampler.VariableSampler` just be given an input catalog of information that contains the columns 'mag','err','jd','band'.  It must also be given the template which must have the columns 'mag','phase'.  Finally, `ampratios` should be a dictionary where the keys are the names of the unique bands.
+
 Here's an example of how to run it.
 
 .. code-block:: python
